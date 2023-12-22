@@ -16,6 +16,9 @@
 #include "dbc/dbc_parser.h"
 #include "v2c/v2c_transcoder.h"
 #include "aox_can_msgs/msg/set_conf1.hpp"
+#include "aox_can_msgs/msg/can_frame.hpp"
+
+using namespace std::chrono_literals;
 
 std::string read_file(const std::string &dbc_path)
 {
@@ -24,41 +27,7 @@ std::string read_file(const std::string &dbc_path)
     ss << dbc_content.rdbuf();
     return ss.str();
 }
-// can_frame convertCh1ConfigInfoToCANFrame(std::make_shared<aox_can_msgs::msg::SetConf1>() conf1_set_msg)
-// {
-//     can_frame frame;
-//     double ch4_setpoint = conf1_set_msg->conf1_ch4_setpoint;
-//     double ch3_setpoint = conf1_set_msg->conf1_ch3_setpoint;
-//     double ch2_setpoint = conf1_set_msg->conf1_ch2_setpoint;
-//     double ch1_setpoint = conf1_set_msg->conf1_ch1_setpoint;
 
-//     frame.can_id = 6;  // Message ID
-//     frame.can_dlc = 8; // Number of data bytes
-//     frame.can_extended = false;
-//     frame.can_rtr = false;
-
-//     // Convert ch4_setpoint to two bytes
-//     int16_t ch4_setpoint_bytes = static_cast<int16_t>((ch4_setpoint + 800) / 0.05);
-//     frame.data[0] = ch4_setpoint_bytes & 0xFF;
-//     frame.data[1] = (ch4_setpoint_bytes >> 8) & 0xFF;
-
-//     // Convert ch3_setpoint to two bytes
-//     int16_t ch3_setpoint_bytes = static_cast<int16_t>(ch3_setpoint / 0.5);
-//     frame.data[2] = ch3_setpoint_bytes & 0xFF;
-//     frame.data[3] = (ch3_setpoint_bytes >> 8) & 0xFF;
-
-//     // Convert ch2_setpoint to two bytes
-//     int16_t ch2_setpoint_bytes = static_cast<int16_t>(ch2_setpoint / 0.5);
-//     frame.data[4] = ch2_setpoint_bytes & 0xFF;
-//     frame.data[5] = (ch2_setpoint_bytes >> 8) & 0xFF;
-
-//     // Convert ch1_setpoint to two bytes
-//     int16_t ch1_setpoint_bytes = static_cast<int16_t>(ch1_setpoint / 0.5);
-//     frame.data[6] = ch1_setpoint_bytes & 0xFF;
-//     frame.data[7] = (ch1_setpoint_bytes >> 8) & 0xFF;
-
-//     return frame;
-// }
 class DBCParsingNode : public rclcpp::Node
 {
 public:
@@ -74,7 +43,18 @@ private:
     struct ifreq ifr;
     can::v2c_transcoder transcoder;
     int32_t frameCounter = 0;
+    rclcpp::Publisher<aox_can_msgs::msg::CanFrame>::SharedPtr publisher_;
+    rclcpp::TimerBase::SharedPtr timer_;
 
+    void timer_callback(aox_can_msgs::msg::CanFrame message)
+    {
+        RCLCPP_INFO(this->get_logger(), "Publishing:");
+        for (int i = 0; i < message.len; i++)
+        {
+            RCLCPP_INFO(this->get_logger(), " %d", message.data[i]);
+        }
+        publisher_->publish(message);
+    }
     int setupSocket()
     {
         // Create a socket
@@ -111,7 +91,6 @@ private:
 
     void parseDBCFrames()
     {
-
         auto start = std::chrono::system_clock::now();
         // bool parsed = can::parse_dbc(read_file("/home/devuser/AOX/ROS2/src/can-utils/example/example.dbc"), std::ref(transcoder));
         bool parsed = can::parse_dbc(read_file("/home/devuser/AOX/ROS2/mspc_set_msgs.dbc"), std::ref(transcoder));
@@ -130,13 +109,13 @@ private:
     void SendCANFrames()
     {
         can_frame frame;
-        // Populate the BatteryInfo message with data
+        // Populate the message with data
         auto conf1_set_msg = std::make_shared<aox_can_msgs::msg::SetConf1>();
         conf1_set_msg->conf1_ch4_setpoint = 1;
         conf1_set_msg->conf1_ch3_setpoint = 4;
         conf1_set_msg->conf1_ch2_setpoint = 789;
         conf1_set_msg->conf1_ch1_setpoint = 5;
-        // // Convert BatteryInfo message to CAN frame using the converter
+        // // Convert message to CAN frame using the converter
         // can_frame can_frame = convertCh1ConfigInfoToCANFrame(conf1_set_msg);
         double ch4_setpoint = conf1_set_msg->conf1_ch4_setpoint;
         double ch3_setpoint = conf1_set_msg->conf1_ch3_setpoint;
@@ -200,7 +179,8 @@ private:
     }
     void processCANFrame(const struct can_frame &frame, const struct can_frame &send_frame)
     {
-        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr publisher_ = this->create_publisher<std_msgs::msg::String>("Config1_SetPoints_1", 10);
+        publisher_ = this->create_publisher<aox_can_msgs::msg::CanFrame>("can_frame", 10);
+
         std::cout << "Received CAN frame:" << std::endl;
         std::cout << "  ID: 0x" << std::hex << frame.can_id << std::dec << std::endl;
         std::cout << "  DLC: " << static_cast<int>(frame.can_dlc) << std::endl;
@@ -227,14 +207,20 @@ private:
         if ((frame.data[0] == send_frame.data[0]) && (frame.data[1] == send_frame.data[1]) && (frame.data[2] == send_frame.data[2]) && (frame.data[3] == send_frame.data[3]))
         {
             std::cout << "set-points for the configuration A were successfully defined!!!" << std::endl;
-            auto message = std_msgs::msg::String();
-            message.data = "Configuration A  set points defined!";
-            RCLCPP_INFO(this->get_logger(), "Publishing: %s", message.data.c_str());
-            publisher_->publish(message);
+            // auto message = std_msgs::msg::String();
+            // message.data = "Configuration A  set points defined!";
+
+            // RCLCPP_INFO(this->get_logger(), "Publishing: %d", message.data);
+            aox_can_msgs::msg::CanFrame message;
+            message.can_id = frame.can_id;
+            message.len = frame.can_dlc;
+
+            std::copy(frame.data, frame.data + 8, message.data.begin());
+            timer_ = create_wall_timer(1000ms, [this, message]()
+                                       { timer_callback(message); });
         }
         if (!fp.empty())
             frameCounter = 0;
-        // print_frames(fp, transcoder, frame_counter);
     }
 };
 
